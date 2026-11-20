@@ -1,0 +1,39 @@
+{
+  "added": [
+    "row-NEW-1"
+  ],
+  "affected_groups": [
+    "g000",
+    "g001",
+    "g002",
+    "g003"
+  ],
+  "changed": [
+    "row-000002",
+    "row-000003",
+    "row-000020"
+  ],
+  "changed_row_ids": [
+    "row-000002",
+    "row-000003",
+    "row-000020",
+    "row-000040",
+    "row-NEW-1"
+  ],
+  "new_version": 2,
+  "old_version": 1,
+  "removed": [
+    "row-000040"
+  ],
+  "rescanned_groups": [
+    "g000",
+    "g001",
+    "g002",
+    "g003"
+  ],
+  "reused_groups": [
+    "g004"
+  ],
+  "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "selected_total": 30
+}
