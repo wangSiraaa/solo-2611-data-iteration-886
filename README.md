@@ -1,14 +1,25 @@
-# 可修订加权记录源与可重复加权采样
+# 可修订加权记录源、可重复加权采样与同源隔离
 
-本仓库实现两个可独立运行的模块：
+本仓库实现可独立运行的模块：
 
 - `python -m wrsource.source`：SQLite 支撑的可修订加权记录源，稳定 `row_id`、
   分组、权重 1..100、正文、递增修订号、不可变源版本快照与固定版本分页。
 - `python -m wrsource.dataset`：可重复的加权采样数据集生产器，全量构建、按变更
   清单增量刷新、真实 JSONL + manifest 输出与对照源 API 的校验。
+- `python -m wrsource.evidence`：**可修订的“出自同一原件”具名证据台账**，独立
+  证据修订号、并行边、撤销、任意旧版重开与带证据 id 的同源路径证人。
+- `python -m wrsource.training`：**训练暴露账**，按训练计划只追加登记真正发出的
+  原始行身份；不能从今天的源倒推旧训练名单，撤回的训练记录仍是已见原件。
+- `python -m wrsource.package`：**评测包采样器与封存登记处**，固定
+  `(训练计划, 源版本, 证据版)` 三元组，剔除同源候选后按原精确加权排序与组名额
+  补位；已签包反查、干净包重发、资格解释与防篡改指纹。
+- `python -m wrsource.loan`：**借阅隔离时间线**，在一段连续证据修订上逐版判定，
+  只报告真正的进入/退出隔离动作；单包临时查询与多包外部追查共用同一修订扫描。
 
-另一个模块 `wrsource/sampling.py` 只负责**精确**抽样键算术与选择；`wrsource/reference.py`
-是测试用的小集合独立参考实现。没有模型训练，也没有人工标注界面。
+另一个模块 `wrsource/sampling.py` 只负责**精确**抽样键算术与选择；
+`wrsource/reference.py` 是测试用的小集合独立参考实现；`wrsource/graph.py` 是
+无 I/O 的同源图（邻接、传递闭包、BFS 证人路径）。没有模型训练，也没有人工标注
+界面，全部用合成文本演示。
 
 ## 抽样规则（题目定义，照此实现）
 
@@ -143,6 +154,76 @@ O(1) 的 float 快路，只在极近时回退 Decimal 与大整数幂。`cut` �
 `hash_hex`，并做一次同版本全量重建比对身份、顺序与真实正文。因此**每行都从源
 API 回查验证**，而不是只写抽样元数据。
 
+## 同源证据台账（`wrsource.evidence` + `wrsource.graph`）
+
+源服务修订的是**行内容**，证据台账独立修订的是**两个稳定行身份出自同一原件**
+的具名证据，两条历史不共享修订号；修订 0 恒为空图。
+
+- 证据是**无向边**，带全局唯一的具名 `evidence_id`，端点按行身份规范化存储。
+- 一版的同源等价关系 = 该版仍有效证据的**传递闭包**（并查集式连通分量）。
+- 同一对端点允许**并行证据**：两份独立证据同时支持一条关系，撤销其中一份时另一
+  份仍维持连通，直到最后一份被撤销才真正断开。
+- 行身份不依赖正文状态：正文已撤回的行（如示例中的 M）仍是图节点，可以连结另外
+  两份出处；正文相同的两条记录不会自动同源，只有显式证据才建边。
+- `evidence_ops` 只追加，任何旧修订都可重开。`snapshot(rev)` 重建该版闭包并按
+  修订缓存；`same_origin` 回答是否同源，`origin_path` 返回 BFS 证人路径（节点序列
+  + 沿途每条证据 id），BFS 邻接按 `(对端, 证据 id)` 排序，结果确定。
+
+## 训练暴露账（`wrsource.training`）
+
+训练产品真正发出的原始行身份按**训练计划**登记，计划之间互不影响：
+
+- `register_batch` 只追加批次，记录批次序号、发出时的源版本/证据修订（元数据）
+  与行身份清单；同一行重复发出不改变其首次批次归属。
+- 暴露集合**不能从今天的源倒推**：源里后来撤回/改正的行，其历史暴露仍在账上。
+- `retract_exposure` 把训练记录标记为撤回，但默认查询仍包含该行——原件曾经被
+  模型见过，隔离判定一律按“曾暴露”处理，理由中带 `training_record_retracted`。
+- `exposed_rows(plan, as_of_batch=N)` 支持窗口化追查：只看窗口前已经发生的批次，
+  窗口内新增训练批次不会追溯移动一份在借包。
+
+## 评测包：固定三元组、剔除、精确补位（`wrsource.package`）
+
+出包时一次性固定 `(training_plan, source_version, evidence_revision)`（以及种子、
+组名额、训练批次截止点），全部写入 manifest：
+
+1. 候选 = 固定源版本中的活跃行（撤回正文的行自然不在候选里，但其证据节点仍参与
+   闭包计算）。
+2. 对每条候选，在固定证据快照上求其连通分量；分量包含计划下任一曾暴露行（含已撤
+   回的训练记录）即剔除，并保存每条暴露链的证人路径作为依据。
+3. 幸存者沿用 `wrsource.sampling` 的**原精确加权排序**，按组取 top-quota，被剔除
+   的名额由真正的下一名补位（不是对旧样本重抽）；边界仍出精确整数比较证书。
+4. `explain_eligibility` 让采样器解释任意记录为何仍有资格：无暴露行与其同分量即
+   合格，结论可仅凭 manifest 中的固定三元组离线复算。
+
+manifest 经规范化 JSON 做 SHA-256 指纹后存入只追加的 `PackageRegistry`，打开时
+重算指纹，篡改即拒。
+
+### 已签包复查与干净包重发
+
+- **已签包不可变**。`recheck_package` 用（通常更新的）证据版对包内**实际签署的
+  行身份**逐条裁决：新进入暴露分量的行列入隔离项并附依据，其余列入仍干净；旧包
+  当时的判断原样保留。
+- `reissue_clean_package` 用同一种子与名额在新证据版重新抽足，新包带
+  `parent_package_id` 回链旧包，并给出 `dropped_rows`（区分隔离 / 源端已消失）与
+  `backfilled_rows` 补位账；新旧两个签封包并存。
+- 一个来源修正可能先分裂大组、再被另一证据重新连回：复查只看指定计划的暴露集，
+  其它计划的暴露不影响本计划；库中可同时存在许多计划与封存包。
+
+## 借阅隔离时间线（`wrsource.loan`）
+
+输入：训练计划、在借包（只取签封时的实际行身份）、连续证据修订窗口
+`[start_rev, end_rev]` 与窗口前的训练批次截止点。
+
+- 暴露集在整个窗口内冻结为截止点之前的批次；同源关系按每个修订当时仍有效的证据
+  闭包逐版重算（多包追查时同一修订的快照只构建一次并共享）。
+- 输出窗口起点的隔离状态（含每行人/不行的依据）以及之后**每次真正的状态翻转**：
+  `enter` 带暴露链证人，`exit` 带触发解封的撤销操作。已经隔离再补并行边、两份
+  证据撤掉其中一份，都不产生事件。
+- 题面序列（起点 X、B 分离；新建证据 a → 新建并行证据 b → 撤 a → 撤 b）严格产生
+  两个动作：rev 1 进入、rev 4 退出；对没有 X 暴露的另一计划，同一包零动作。
+- 工作人员临时查一包（`loan timeline`）与外部追查多包（`loan investigate`）走同一
+  驱动函数，因此两种入口对同一修订序列给出完全一致的应执行动作。
+
 ## 代码结构
 
 ```
@@ -151,12 +232,22 @@ wrsource/
   source.py     版本化源服务 + 分页 + CLI（可独立运行）
   dataset.py    全量构建 / 增量刷新 / 校验 + CLI（可独立运行）
   reference.py  测试用独立精确参考实现
+  graph.py      同源图：邻接、连通分量、BFS 证人路径（无 I/O）
+  evidence.py   具名证据台账：并行边、撤销、任意旧版重开 + CLI
+  training.py   训练暴露账：按计划只追加、撤回留痕、as-of 查询 + CLI
+  package.py    评测包采样、签封登记处、资格解释、复查/重发 + CLI
+  loan.py       借阅隔离时间线：逐版翻转事件、单包/批量同一驱动 + CLI
 tests/
-  test_sampling.py  键构造、双向一致性、极近键、边界证书、参考对照
-  test_source.py    原子批次、折叠、修订号、分片移动、分页并发、重启
-  test_dataset.py   全量/参考对照、零/超名额、正文版本、分片不变性、
-                    并行一致、撤回首名补位、改组、增量==全量、篡改检测、重开
-demo/run_demo.py    端到端演示（含 --large 10 万行）
+  test_sampling.py        键构造、双向一致性、极近键、边界证书、参考对照
+  test_source.py          原子批次、折叠、修订号、分片移动、分页并发、重启
+  test_dataset.py         全量/参考对照、零/超名额、正文版本、分片不变性、
+                          并行一致、撤回首名补位、改组、增量==全量、篡改检测、重开
+  test_evidence.py        闭包、撤回正文节点、并行边、分裂再连回、旧版重开
+  test_training.py        批次、as-of、撤回留痕、计划独立
+  test_package_loan.py    题面三选样、同文不同源、签封反查、补位重发、
+                          撤回训练记录仍隔离、借阅时间线、批量追查、截止批次
+demo/run_demo.py              源 + 采样端到端演示（含 --large 10 万行）
+demo/run_provenance_demo.py   同源/暴露/评测包/借阅隔离端到端演示
 ```
 
 ## 运行
@@ -165,9 +256,10 @@ demo/run_demo.py    端到端演示（含 --large 10 万行）
 # 测试
 python3 -m unittest discover -s tests -v
 
-# 演示（小规模 / 10 万行）
+# 演示
 python3 demo/run_demo.py
 python3 demo/run_demo.py --large --parallel
+python3 demo/run_provenance_demo.py
 
 # 源服务 CLI
 python3 -m wrsource.source init --db src.sqlite
@@ -186,6 +278,52 @@ python3 -m wrsource.dataset refresh --db src.sqlite --old ds_v1 \
     --new-version 2 --out ds_v2
 python3 -m wrsource.dataset verify --db src.sqlite --dataset ds_v2
 python3 -m wrsource.dataset compare --a ds_v2 --b ds_v2_full
+
+# 同源证据 CLI
+python3 -m wrsource.evidence init --db evidence.sqlite
+python3 -m wrsource.evidence add --db evidence.sqlite \
+    --evidence-id ev-1 --a X --b M --note "同原件"
+python3 -m wrsource.evidence revoke --db evidence.sqlite --evidence-id ev-1
+python3 -m wrsource.evidence same-origin --db evidence.sqlite \
+    --a X --b B --revision 3
+python3 -m wrsource.evidence path --db evidence.sqlite --a X --b B
+python3 -m wrsource.evidence log --db evidence.sqlite
+
+# 训练暴露账 CLI
+python3 -m wrsource.training init --db training.sqlite
+python3 -m wrsource.training create-plan --db training.sqlite --plan T
+python3 -m wrsource.training register --db training.sqlite --plan T \
+    --rows X,Y --source-version 5 --evidence-revision 2
+python3 -m wrsource.training retract --db training.sqlite --plan T --row-id X
+python3 -m wrsource.training exposed --db training.sqlite --plan T \
+    --as-of-batch 1
+
+# 评测包 CLI
+python3 -m wrsource.package issue --source-db src.sqlite \
+    --training-db training.sqlite --evidence-db evidence.sqlite \
+    --registry-db packages.sqlite --source-version 5 \
+    --seed-hex <64 hex> --plan T --evidence-revision 3 --quota g1=10
+python3 -m wrsource.package list --registry-db packages.sqlite
+python3 -m wrsource.package open --registry-db packages.sqlite \
+    --package-id <PKG>
+python3 -m wrsource.package explain --training-db training.sqlite \
+    --evidence-db evidence.sqlite --plan T --row-id B --evidence-revision 3
+python3 -m wrsource.package recheck --registry-db packages.sqlite \
+    --training-db training.sqlite --evidence-db evidence.sqlite \
+    --package-id <PKG>
+python3 -m wrsource.package reissue --source-db src.sqlite \
+    --training-db training.sqlite --evidence-db evidence.sqlite \
+    --registry-db packages.sqlite --package-id <PKG>
+
+# 借阅隔离时间线 CLI（单包临时查询 / 多包外部追查）
+python3 -m wrsource.loan timeline --registry-db packages.sqlite \
+    --training-db training.sqlite --evidence-db evidence.sqlite \
+    --plan T --start-rev 0 --end-rev 4 --cutoff-batch 1 \
+    --package-id <PKG> --loan-id loan-1
+python3 -m wrsource.loan investigate --registry-db packages.sqlite \
+    --training-db training.sqlite --evidence-db evidence.sqlite \
+    --plan T --start-rev 0 --end-rev 4 --cutoff-batch 1 \
+    --loans-json loans.json
 ```
 
 规模验证：10 万行、100 组、每组 quota 1000（合计 10 万样本）时，写入约 2s，
